@@ -6,6 +6,28 @@ finality rules integrated with payroll state.
 
 ---
 
+## Dispute Reasons
+
+Every dispute must be filed with one of the following structured categories.
+Structured reasons make disputes filterable and reportable; free text is
+intentionally bounded to prevent on-chain storage bloat.
+
+| Variant | Description |
+|---------|-------------|
+| `NonDelivery` | Goods or services were not delivered |
+| `QualityIssue` | Delivered work did not meet the agreed quality standard |
+| `PaymentDispute` | Disagreement over payment amount or timing |
+| `Other(text)` | Free-text reason; text is **capped at 256 bytes** (`ReasonTooLong` error if exceeded) |
+
+Use `Other` only when none of the structured categories apply. The 256-byte cap
+prevents a malicious filer from using an arbitrarily large string to bloat
+on-chain storage at negligible cost.
+
+The reason is stored in `DisputeDetails.reason` and is immutable — it does not
+change through escalation, resolution, or appeal.
+
+---
+
 ## State Machine
 
 ```text
@@ -102,7 +124,7 @@ Admin can set the `PendingReview` window with `set_pending_review_time_limit` (d
 | Function | Caller | Permissionless? | Description |
 |----------|--------|-----------------|-------------|
 | `initialize(owner, admin)` | owner | — | One-time setup |
-| `file_dispute(caller, agreement_id)` | any | ✓ | Open a Level1 dispute; SLA clock starts |
+| `file_dispute(caller, agreement_id, reason)` | any | ✓ | Open a Level1 dispute; SLA clock starts |
 | `escalate_dispute(caller, agreement_id)` | any | ✓ | Move to next tier within the SLA window |
 | `keeper_advance_stage(caller, agreement_id)` | any | ✓ | After SLA elapsed: `Open/Escalated/Appealed → PendingReview` |
 | `resolve_dispute(caller, agreement_id, outcome)` | **admin** | ✗ | Issue binding ruling; opens 3-day appeal window at L1/L2 |
@@ -345,6 +367,7 @@ Level1/2 resolution → status = Resolved (3-day appeal window opens)
 | `phase_started_at` | `u64` | Ledger timestamp when the current phase began |
 | `phase_deadline` | `u64` | Ledger timestamp at which the current phase expires |
 | `outcome` | `DisputeOutcome` | Binding ruling once resolved; `Unset` while open |
+| `reason` | `DisputeReason` | Why the dispute was raised; immutable after filing |
 
 > `phase_started_at` doubles as the **SLA breach timestamp** when
 > `status == PendingReview`: it records the exact moment the keeper advanced
@@ -361,7 +384,7 @@ Level1/2 resolution → status = Resolved (3-day appeal window opens)
 client.initialize(&owner, &admin);
 
 // 2. Employee files dispute — SLA clock starts immediately
-client.file_dispute(&employee, &agreement_id);
+client.file_dispute(&employee, &agreement_id, &DisputeReason::PaymentDispute);
 
 // 3. Admin resolves at Level1 — 3-day appeal window opens
 client.resolve_dispute(&admin, &agreement_id, &DisputeOutcome::UpholdPayment);
@@ -374,7 +397,7 @@ client.resolve_dispute(&admin, &agreement_id, &DisputeOutcome::UpholdPayment);
 
 ```rust
 // 1. File
-client.file_dispute(&employee, &agreement_id);
+client.file_dispute(&employee, &agreement_id, &DisputeReason::PaymentDispute);
 
 // 2. Escalate to Level2 (within SLA window)
 client.escalate_dispute(&employee, &agreement_id);
@@ -394,7 +417,7 @@ client.resolve_dispute(&admin, &agreement_id, &DisputeOutcome::GrantClaim);
 
 ```rust
 // 1. File dispute
-client.file_dispute(&employee, &agreement_id);
+client.file_dispute(&employee, &agreement_id, &DisputeReason::NonDelivery);
 // phase_deadline = now + 604_800 (7 days)
 
 // ...7 days pass, admin has not acted...
@@ -424,7 +447,7 @@ client.set_level_time_limit(&admin, &EscalationLevel::Level1, &3600u64);
 // Set a 6-hour pending-review window
 client.set_pending_review_time_limit(&admin, &21_600u64);
 
-client.file_dispute(&user, &agreement_id);
+client.file_dispute(&user, &agreement_id, &DisputeReason::PaymentDispute);
 // phase_deadline = now + 3600
 
 // After 1 hour + 1 second:
@@ -449,6 +472,8 @@ client.keeper_advance_stage(&keeper, &agreement_id);
 | 9 | `DeadlineNotPassed` | Cannot expire or advance a dispute before its current deadline |
 | 10 | `AlreadyTerminal` | Dispute is already in `Expired` state |
 | 11 | `AlreadyPendingReview` | `keeper_advance_stage` already called; repeated call rejected |
+| 12 | `SlaDeadlineOverflow` | SLA deadline computation overflowed; keeper cannot proceed |
+| 13 | `ReasonTooLong` | `Other` text exceeds 256 bytes |
 
 ---
 
